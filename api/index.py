@@ -12,7 +12,7 @@ champions_win_rate = {}
 
 @app.route('/')
 def home():
-    return 'Hello folks! Welcome to LOL\'s statics API.'
+    return 'Hello folks! Welcome to LOL\'s Pro statics API.'
 
 
 @app.route('/all-match-info/<player>')
@@ -61,8 +61,56 @@ def lpl_match_info(player):
     return lpl_res
 
 
-def world_count():
-    return
+@app.route('/world-match-info/<player>')
+def world_match_info(player):
+    response = all_match_info(player)
+    if len(response) == 0:
+        return []
+
+    world_res = []
+    for res in response:
+        match_id = res["MatchId"]
+        if match_id.find("World") != -1 or match_id.find("Mid-Season") != -1 or match_id.find("Rift Rivals") != -1:
+            world_res.append(res)
+    return world_res
+
+
+@app.route('/world-stat/<player>')
+def world_stat(player):
+    response = world_match_info(player)
+    if len(response) == 0:
+        return []
+
+    match_total = 0
+    match_win_total = 0
+    match_kills = 0
+    match_deaths = 0
+    match_assists = 0
+
+    for res in response:
+        match_total += 1
+        match_kills += int(res["Kills"])
+        match_deaths += int(res["Deaths"])
+        match_assists += int(res["Assists"])
+        champion = res["Champion"]
+        if champion not in champions_match_total:
+            champions_match_total[champion] = 1
+            champions_match_win[champion] = 0
+        else:
+            champions_match_total[champion] += 1
+        if res["PlayerWin"] == "Yes":
+            match_win_total += 1
+            champions_match_win[champion] += 1
+
+    champions = champions_match_total.keys()
+    for champion in champions:
+        champions_win_rate[champion] = round(champions_match_win[champion] / champions_match_total[champion], 2)
+    return [
+        {"world_total": match_total,
+         "world_win_total": match_win_total,
+         "world_win_rate": round(match_win_total / match_total, 2),
+         "world_kills": match_kills, "world_deaths": match_deaths, "world_assists": match_assists},
+        champions_win_rate, champions_match_total]
 
 
 @app.route('/lpl-stat/<player>')
