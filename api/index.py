@@ -85,7 +85,7 @@ def world_stat(player):
         return []
 
     match_total = 0
-    match_win_total = 0
+    match_wins = 0
     match_kills = 0
     match_deaths = 0
     match_assists = 0
@@ -102,17 +102,17 @@ def world_stat(player):
         else:
             champions_match_total[champion] += 1
         if res["PlayerWin"] == "Yes":
-            match_win_total += 1
+            match_wins += 1
             champions_match_win[champion] += 1
 
     champions = champions_match_total.keys()
     for champion in champions:
         champions_win_rate[champion] = round(champions_match_win[champion] / champions_match_total[champion], 2)
     return [
-        {"world_total": match_total,
-         "world_win_total": match_win_total,
-         "world_win_rate": round(match_win_total / match_total, 2),
-         "world_kills": match_kills, "world_deaths": match_deaths, "world_assists": match_assists},
+        {"total": match_total,
+         "wins": match_wins,
+         "win_rate": round(match_wins / match_total, 2),
+         "kills": match_kills, "deaths": match_deaths, "assists": match_assists},
         champions_win_rate, champions_match_total]
 
 
@@ -123,7 +123,7 @@ def lpl_stat(player):
         return []
 
     match_total = 0
-    match_win_total = 0
+    match_wins = 0
     match_kills = 0
     match_deaths = 0
     match_assists = 0
@@ -140,15 +140,15 @@ def lpl_stat(player):
         else:
             champions_match_total[champion] += 1
         if res["PlayerWin"] == "Yes":
-            match_win_total += 1
+            match_wins += 1
             champions_match_win[champion] += 1
 
     champions = champions_match_total.keys()
     for champion in champions:
         champions_win_rate[champion] = round(champions_match_win[champion] / champions_match_total[champion], 2)
     return [
-        {"lpl_total": match_total,
-         "lpl_win_total": match_win_total,
-         "lpl_win_rate": round(match_win_total / match_total, 2),
-         "lpl_kills": match_kills, "lpl_deaths": match_deaths, "lpl_assists": match_assists},
+        {"total": match_total,
+         "wins": match_wins,
+         "win_rate": round(match_wins / match_total, 2),
+         "kills": match_kills, "deaths": match_deaths, "assists": match_assists},
         champions_win_rate, champions_match_total]
