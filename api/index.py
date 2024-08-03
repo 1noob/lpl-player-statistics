@@ -2,7 +2,10 @@ from flask import Flask
 from mwrogue.esports_client import EsportsClient
 from datetime import datetime, timezone, timedelta
 
+from flask_cors import CORS
+
 app = Flask(__name__)
+CORS(app)
 
 site = EsportsClient("lol")
 champions_match_total = {}
