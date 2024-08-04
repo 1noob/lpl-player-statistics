@@ -6,11 +6,7 @@ from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
-
 site = EsportsClient("lol")
-champions_match_total = {}
-champions_match_win = {}
-champions_win_rate = {}
 
 
 @app.route('/')
@@ -81,44 +77,18 @@ def world_match_info(player):
 @app.route('/world-stat/<player>')
 def world_stat(player):
     response = world_match_info(player)
-    if len(response) == 0:
-        return []
-
-    match_total = 0
-    match_wins = 0
-    match_kills = 0
-    match_deaths = 0
-    match_assists = 0
-
-    for res in response:
-        match_total += 1
-        match_kills += int(res["Kills"])
-        match_deaths += int(res["Deaths"])
-        match_assists += int(res["Assists"])
-        champion = res["Champion"]
-        if champion not in champions_match_total:
-            champions_match_total[champion] = 1
-            champions_match_win[champion] = 0
-        else:
-            champions_match_total[champion] += 1
-        if res["PlayerWin"] == "Yes":
-            match_wins += 1
-            champions_match_win[champion] += 1
-
-    champions = champions_match_total.keys()
-    for champion in champions:
-        champions_win_rate[champion] = round(champions_match_win[champion] / champions_match_total[champion], 2)
-    return [
-        {"total": match_total,
-         "wins": match_wins,
-         "win_rate": round(match_wins / match_total, 2),
-         "kills": match_kills, "deaths": match_deaths, "assists": match_assists},
-        champions_win_rate, champions_match_total]
+    return data_process(response)
 
 
 @app.route('/lpl-stat/<player>')
 def lpl_stat(player):
     response = lpl_match_info(player)
+    return data_process(response)
+
+
+def data_process(response):
+    champions_meta = {}
+
     if len(response) == 0:
         return []
 
@@ -133,22 +103,35 @@ def lpl_stat(player):
         match_kills += int(res["Kills"])
         match_deaths += int(res["Deaths"])
         match_assists += int(res["Assists"])
-        champion = res["Champion"]
-        if champion not in champions_match_total:
-            champions_match_total[champion] = 1
-            champions_match_win[champion] = 0
+
+        champion_name = res["Champion"]
+        if champion_name not in champions_meta.keys():
+            champions_meta[champion_name] = {
+                "name": champion_name,
+                "games": 1,
+                "wins": 0,
+                "kills": int(res["Kills"]),
+                "deaths": int(res["Deaths"]),
+                "assists": int(res["Assists"]),
+            }
         else:
-            champions_match_total[champion] += 1
+            champions_meta[champion_name]["games"] += 1
+            champions_meta[champion_name]["kills"] += int(res["Kills"])
+            champions_meta[champion_name]["deaths"] += int(res["Deaths"])
+            champions_meta[champion_name]["assists"] += int(res["Assists"])
+
         if res["PlayerWin"] == "Yes":
             match_wins += 1
-            champions_match_win[champion] += 1
+            champions_meta[champion_name]["wins"] += 1
 
-    champions = champions_match_total.keys()
+    champions = champions_meta.keys()
+
     for champion in champions:
-        champions_win_rate[champion] = round(champions_match_win[champion] / champions_match_total[champion], 2)
+        champions_meta[champion]["win_rate"] = round(champions_meta[champion]["wins"] / champions_meta[champion]["games"], 2)
+
     return [
         {"total": match_total,
          "wins": match_wins,
          "win_rate": round(match_wins / match_total, 2),
          "kills": match_kills, "deaths": match_deaths, "assists": match_assists},
-        champions_win_rate, champions_match_total]
+        champions_meta]
