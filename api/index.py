@@ -11,7 +11,7 @@ site = EsportsClient("lol")
 
 @app.route('/')
 def home():
-    return 'Hello folks! Welcome to LOL\'s Pro statics API.'
+    return 'Hello folks! Welcome to lpl statistics API.'
 
 
 @app.route('/all-match-info/<player>')
