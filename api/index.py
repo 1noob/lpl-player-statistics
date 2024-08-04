@@ -87,7 +87,8 @@ def lpl_stat(player):
 
 
 def data_process(response):
-    champions_meta = {}
+    champions_meta = []
+    champions_dict = {}
 
     if len(response) == 0:
         return []
@@ -98,6 +99,7 @@ def data_process(response):
     match_deaths = 0
     match_assists = 0
 
+    index = 0
     for res in response:
         match_total += 1
         match_kills += int(res["Kills"])
@@ -105,29 +107,35 @@ def data_process(response):
         match_assists += int(res["Assists"])
 
         champion_name = res["Champion"]
-        if champion_name not in champions_meta.keys():
-            champions_meta[champion_name] = {
+        if champion_name not in champions_dict.keys():
+            champions_dict[champion_name] = index
+            champions_meta.append({
                 "name": champion_name,
                 "games": 1,
                 "wins": 0,
                 "kills": int(res["Kills"]),
                 "deaths": int(res["Deaths"]),
                 "assists": int(res["Assists"]),
-            }
+            })
+            index += 1
         else:
-            champions_meta[champion_name]["games"] += 1
-            champions_meta[champion_name]["kills"] += int(res["Kills"])
-            champions_meta[champion_name]["deaths"] += int(res["Deaths"])
-            champions_meta[champion_name]["assists"] += int(res["Assists"])
+            champion_index = champions_dict[champion_name]
+            champions_meta[champion_index]["games"] += 1
+            champions_meta[champion_index]["kills"] += int(res["Kills"])
+            champions_meta[champion_index]["deaths"] += int(res["Deaths"])
+            champions_meta[champion_index]["assists"] += int(res["Assists"])
 
         if res["PlayerWin"] == "Yes":
             match_wins += 1
-            champions_meta[champion_name]["wins"] += 1
+            champions_meta[champions_dict[champion_name]]["wins"] += 1
 
-    champions = champions_meta.keys()
+    champions = champions_dict.keys()
 
     for champion in champions:
-        champions_meta[champion]["win_rate"] = round(champions_meta[champion]["wins"] / champions_meta[champion]["games"], 2)
+        champion_index = champions_dict[champion]
+        champions_meta[champion_index]["win_rate"] = round(champions_meta[champion_index]["wins"] / champions_meta[champion_index]["games"], 2)
+
+    champions_meta = sorted(champions_meta, key=lambda i: (i['games'], i['win_rate']), reverse=True)
 
     return [
         {"total": match_total,
