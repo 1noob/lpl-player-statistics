@@ -24,7 +24,7 @@ def match_schedule(player):
     )[0]["Team"]
 
     response = site.cargo_client.query(
-        limit=2,
+        limit=3,
         tables="MatchSchedule=MS, Tournaments=T",
         fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName",
         where='MS.Team1="%s" OR MS.Team2="%s"' % (team, team),
