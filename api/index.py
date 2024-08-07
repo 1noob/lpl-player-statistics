@@ -14,6 +14,30 @@ def home():
     return 'Hello folks! Welcome to lpl statistics API.'
 
 
+@app.route('/match-schedule/<player>')
+def match_schedule(player):
+    team = site.cargo_client.query(
+        limit=1,
+        tables="Players=P",
+        fields="P.Team",
+        where='P.ID="%s"' % player,
+    )[0]["Team"]
+
+    response = site.cargo_client.query(
+        limit=2,
+        tables="MatchSchedule=MS",
+        fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score",
+        where='MS.Team1="%s" OR MS.Team2="%s"' % (team, team),
+        order_by="MS.DateTime_UTC DESC"
+    )
+
+    for res in response:
+        cst_date = datetime.strptime(res["DateTime UTC"],  "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
+        res["DateTime CST"] = datetime.strftime(cst_date, "%Y-%m-%d %H:%M:%S %a")
+
+    return response
+
+
 @app.route('/all-match-info/<player>')
 def all_match_info(player):
     response = []
@@ -21,10 +45,9 @@ def all_match_info(player):
     prev = datetime.now(timezone.utc) - timedelta(days=365)
     res = site.cargo_client.query(
         limit=500,
-        tables="ScoreboardPlayers=SP, MatchSchedule=MS",
+        tables="ScoreboardPlayers=SP",
         fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
                "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
-        join_on="SP.MatchId=MS.MatchId",
         where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
         order_by="SP.DateTime_UTC DESC"
     )
