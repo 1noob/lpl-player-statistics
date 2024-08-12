@@ -14,6 +14,11 @@ def home():
     return 'Hello folks! Welcome to lpl statistics API.'
 
 
+@app.route('/<player>')
+def player_all(player):
+    return [lpl_stat(player), world_stat(player), match_schedule(player)]
+
+
 @app.route('/match-schedule/<player>')
 def match_schedule(player):
     team = site.cargo_client.query(
