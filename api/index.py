@@ -39,7 +39,7 @@ def match_schedule(player):
 
     for res in response:
         cst_date = datetime.strptime(res["DateTime UTC"],  "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
-        res["DateTime CST"] = datetime.strftime(cst_date, "%Y-%m-%d %H:%M:%S")
+        res["DateTime CST"] = datetime.strftime(cst_date, "%Y-%m-%d %H:%M")
         res["Day of Week"] = datetime.strftime(cst_date, "%a")
 
     return response
