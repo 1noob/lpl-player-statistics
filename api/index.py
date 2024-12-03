@@ -1,6 +1,7 @@
 from flask import Flask
 from mwrogue.esports_client import EsportsClient
 from datetime import datetime, timezone, timedelta
+import json
 
 from flask_cors import CORS
 
@@ -21,18 +22,25 @@ def player_all(player):
 
 @app.route('/match-schedule/<player>')
 def match_schedule(player):
-    team = site.cargo_client.query(
+    team_list = site.cargo_client.query(
         limit=1,
         tables="Players=P",
         fields="P.Team",
         where='P.ID="%s"' % player,
-    )[0]["Team"]
+    )
+
+    if len(team_list) == 0:
+        return None
+
+    team = team_list[0]['Team']
+
+    datetime_week_later = datetime.now() + timedelta(days=3)
 
     response = site.cargo_client.query(
         limit=3,
         tables="MatchSchedule=MS, Tournaments=T",
         fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName, MS.Stream",
-        where='MS.Team1="%s" OR MS.Team2="%s"' % (team, team),
+        where='(MS.Team1="%s" OR MS.Team2="%s") AND MS.DateTime_UTC<"%s"' % (team, team, datetime_week_later),
         join_on="MS.OverviewPage=T.OverviewPage",
         order_by="MS.DateTime_UTC DESC"
     )
