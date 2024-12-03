@@ -34,7 +34,7 @@ def match_schedule(player):
 
     team = team_list[0]['Team']
 
-    datetime_week_later = datetime.now() + timedelta(days=3)
+    datetime_week_later = datetime.now() + timedelta(days=3) - timedelta(hours=8)
 
     response = site.cargo_client.query(
         limit=3,
