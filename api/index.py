@@ -1,8 +1,7 @@
 from flask import Flask
+import datetime
 from mwrogue.esports_client import EsportsClient
-from datetime import datetime, timezone, timedelta
-import json
-
+from datetime import datetime as d, timezone, timedelta
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -34,7 +33,7 @@ def match_schedule(player):
 
     team = team_list[0]['Team']
 
-    datetime_week_later = datetime.now() + timedelta(days=3) - timedelta(hours=8)
+    datetime_week_later = d.now(timezone.utc) + timedelta(days=3)
 
     response = site.cargo_client.query(
         limit=3,
@@ -46,9 +45,9 @@ def match_schedule(player):
     )
 
     for res in response:
-        cst_date = datetime.strptime(res["DateTime UTC"],  "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
-        res["DateTime CST"] = datetime.strftime(cst_date, "%Y-%m-%d %H:%M:%S")
-        res["Day of Week"] = datetime.strftime(cst_date, "%a")
+        cst_date = d.strptime(res["DateTime UTC"],  "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
+        res["DateTime CST"] = d.strftime(cst_date, "%Y-%m-%d %H:%M:%S")
+        res["Day of Week"] = d.strftime(cst_date, "%a")
 
     return response
 
@@ -56,8 +55,8 @@ def match_schedule(player):
 @app.route('/all-match-info/<player>')
 def all_match_info(player):
     response = []
-    now = datetime.now(timezone.utc)
-    prev = datetime.now(timezone.utc) - timedelta(days=365)
+    now = d.now(timezone.utc)
+    prev = d.now(timezone.utc) - timedelta(days=365)
     res = site.cargo_client.query(
         limit=500,
         tables="ScoreboardPlayers=SP",
