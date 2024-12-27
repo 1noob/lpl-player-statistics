@@ -1,5 +1,4 @@
 from flask import Flask
-import datetime
 from mwrogue.esports_client import EsportsClient
 from datetime import datetime as d, timezone, timedelta
 from flask_cors import CORS
@@ -16,7 +15,7 @@ def home():
 
 @app.route('/<player>')
 def player_all(player):
-    return [lpl_stat(player), world_stat(player), match_schedule(player)]
+    return [lpl_stats(player), world_stats(player), match_schedule(player), all_stats(player)]
 
 
 @app.route('/match-schedule/<player>')
@@ -111,20 +110,20 @@ def world_match_info(player):
     return world_res
 
 
-@app.route('/world-stat/<player>')
-def world_stat(player):
+@app.route('/world-stats/<player>')
+def world_stats(player):
     response = world_match_info(player)
     return data_process(response)
 
 
-@app.route('/lpl-stat/<player>')
-def lpl_stat(player):
+@app.route('/lpl-stats/<player>')
+def lpl_stats(player):
     response = lpl_match_info(player)
     return data_process(response)
 
 
-@app.route('/all-stat/<player>')
-def all_stat(player):
+@app.route('/all-stats/<player>')
+def all_stats(player):
     response = all_match_info(player)
     return data_process(response)
 
