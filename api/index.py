@@ -15,7 +15,7 @@ def home():
 
 @app.route('/<player>')
 def player_all(player):
-    return [lpl_stats(player), world_stats(player), match_schedule(player), all_stats(player)]
+    return [lpl_stats(player), world_stats(player), all_stats(player), match_schedule(player)]
 
 
 @app.route('/match-schedule/<player>')
