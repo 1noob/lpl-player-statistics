@@ -123,6 +123,12 @@ def lpl_stat(player):
     return data_process(response)
 
 
+@app.route('/all-stat/<player>')
+def all_stat(player):
+    response = all_match_info(player)
+    return data_process(response)
+
+
 def data_process(response):
     champions_meta = []
     champions_dict = {}
