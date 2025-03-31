@@ -20,65 +20,71 @@ def player_all(player):
 
 @app.route('/match-schedule/<player>')
 def match_schedule(player):
-    team_list = site.cargo_client.query(
-        limit=1,
-        tables="Players=P",
-        fields="P.Team",
-        where='P.ID="%s"' % player,
-    )
+    try:
+        team_list = site.cargo_client.query(
+            limit=1,
+            tables="Players=P",
+            fields="P.Team",
+            where='P.ID="%s"' % player,
+        )
 
-    if len(team_list) == 0:
-        return None
+        if len(team_list) == 0:
+            return None
 
-    team = team_list[0]['Team']
+        team = team_list[0]['Team']
 
-    datetime_week_later = d.now(timezone.utc) + timedelta(days=3)
+        datetime_week_later = d.now(timezone.utc) + timedelta(days=3)
 
-    response = site.cargo_client.query(
-        limit=3,
-        tables="MatchSchedule=MS, Tournaments=T",
-        fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName, MS.Stream",
-        where='(MS.Team1="%s" OR MS.Team2="%s") AND MS.DateTime_UTC<"%s"' % (team, team, datetime_week_later),
-        join_on="MS.OverviewPage=T.OverviewPage",
-        order_by="MS.DateTime_UTC DESC"
-    )
+        response = site.cargo_client.query(
+            limit=3,
+            tables="MatchSchedule=MS, Tournaments=T",
+            fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName, MS.Stream",
+            where='(MS.Team1="%s" OR MS.Team2="%s") AND MS.DateTime_UTC<"%s"' % (team, team, datetime_week_later),
+            join_on="MS.OverviewPage=T.OverviewPage",
+            order_by="MS.DateTime_UTC DESC"
+        )
 
-    for res in response:
-        cst_date = d.strptime(res["DateTime UTC"],  "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
-        res["DateTime CST"] = d.strftime(cst_date, "%Y-%m-%d %H:%M:%S")
-        res["Day of Week"] = d.strftime(cst_date, "%a")
+        for res in response:
+            cst_date = d.strptime(res["DateTime UTC"],  "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
+            res["DateTime CST"] = d.strftime(cst_date, "%Y-%m-%d %H:%M:%S")
+            res["Day of Week"] = d.strftime(cst_date, "%a")
 
-    return response
+        return response
+    except Exception as e:
+        print(e)
 
 
 @app.route('/all-match-info/<player>')
 def all_match_info(player):
-    response = []
-    now = d.now(timezone.utc)
-    prev = d.now(timezone.utc) - timedelta(days=365)
-    res = site.cargo_client.query(
-        limit=500,
-        tables="ScoreboardPlayers=SP",
-        fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
-               "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
-        where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
-        order_by="SP.DateTime_UTC DESC"
-    )
-    while res:
-        response += res
-        now = prev
-        prev -= timedelta(days=365)
+    try:
+        response = []
+        now = d.now(timezone.utc)
+        prev = d.now(timezone.utc) - timedelta(days=365)
         res = site.cargo_client.query(
             limit=500,
-            tables="ScoreboardPlayers=SP, MatchSchedule=MS",
+            tables="ScoreboardPlayers=SP",
             fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
                    "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
-            join_on="SP.MatchId=MS.MatchId",
             where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
             order_by="SP.DateTime_UTC DESC"
         )
+        while res:
+            response += res
+            now = prev
+            prev -= timedelta(days=365)
+            res = site.cargo_client.query(
+                limit=500,
+                tables="ScoreboardPlayers=SP, MatchSchedule=MS",
+                fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
+                       "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
+                join_on="SP.MatchId=MS.MatchId",
+                where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
+                order_by="SP.DateTime_UTC DESC"
+            )
 
-    return response
+        return response
+    except Exception as e:
+        print(e)
 
 
 @app.route('/lpl-match-info/<player>')
