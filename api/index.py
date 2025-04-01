@@ -140,7 +140,7 @@ def data_process(response):
     champions_meta = []
     champions_dict = {}
 
-    if len(response) == 0:
+    if response is None:
         return []
 
     match_total = 0
