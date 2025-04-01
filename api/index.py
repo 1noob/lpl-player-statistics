@@ -28,7 +28,7 @@ def match_schedule(player):
             where='P.ID="%s"' % player,
         )
 
-        if len(team_list) == 0:
+        if type(team_list) is None:
             return None
 
         team = team_list[0]['Team']
@@ -68,6 +68,8 @@ def all_match_info(player):
             where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
             order_by="SP.DateTime_UTC DESC"
         )
+        if type(res) is None:
+            return None
         while res:
             response += res
             now = prev
@@ -90,7 +92,7 @@ def all_match_info(player):
 @app.route('/lpl-match-info/<player>')
 def lpl_match_info(player):
     response = all_match_info(player)
-    if len(response) == 0:
+    if response is None:
         return []
 
     lpl_res = []
