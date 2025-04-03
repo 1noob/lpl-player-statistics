@@ -1,11 +1,24 @@
-from flask import Flask, jsonify
+import json
+import os
+
+from flask import Flask
 from mwrogue.esports_client import EsportsClient
 from datetime import datetime as d, timezone, timedelta
 from flask_cors import CORS
+from upstash_redis import Redis
+from dotenv import load_dotenv
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 site = EsportsClient("lol")
+
+
+redis = Redis(url=os.environ.get("UPSTASH_REDIS_REST_URL"), token=os.environ.get("UPSTASH_REDIS_REST_TOKEN"))
+
+redis.set("foo", "bar")
+value = redis.get("foo")
+print(value)
 
 
 @app.route('/')
@@ -15,20 +28,29 @@ def home():
 
 @app.route('/<player>')
 def player_all(player):
-    try:
-        response = all_match_info(player)
-        schedule = match_schedule(player)
-        lpl_res = lpl_stats(response)
-        world_res = world_stats(response)
-        all_res = all_stats(response)
-    except Exception as e:
-        print(e)
-        return jsonify({
-            "error": "SERVER_ERROR",
-            "message": "Internal Server Error"
-        }), 500
+    cache_schedule_key = player+'_schedule'
+    cache_match_key = player+'_match'
+
+    cache_schedule_data = redis.get(cache_schedule_key)
+    cache_match_data = redis.get(cache_match_key)
+
+    if cache_schedule_data:
+        schedule_data = json.loads(cache_schedule_data)
     else:
-        return [lpl_res, world_res, all_res, schedule]
+        schedule_data = match_schedule(player)
+        redis.setex(key=cache_schedule_key, value=json.dumps(schedule_data), seconds=3600)
+
+    if cache_match_data:
+        match_data = json.loads(cache_match_data)
+    else:
+        match_data = all_match_info(player)
+        redis.setex(key=cache_match_key, seconds=3600, value=json.dumps(match_data))
+
+    lpl_data = lpl_stats(match_data)
+    world_data = world_stats(match_data)
+    all_data = all_stats(match_data)
+
+    return [lpl_data, world_data, all_data, schedule_data]
 
 
 @app.route('/match-schedule/<player>')
@@ -98,20 +120,22 @@ def all_match_info(player):
 
 def lpl_match_info(response):
     lpl_res = []
-    for res in response:
-        match_id = res["MatchId"]
-        if match_id.find("LPL") != -1 and match_id.find("All-Star") == -1 and match_id.find(
-                "LCK") == -1 and match_id.find("Regional") == -1:
-            lpl_res.append(res)
+    if response:
+        for res in response:
+            match_id = res["MatchId"]
+            if match_id.find("LPL") != -1 and match_id.find("All-Star") == -1 and match_id.find(
+                    "LCK") == -1 and match_id.find("Regional") == -1:
+                lpl_res.append(res)
     return lpl_res
 
 
 def world_match_info(response):
     world_res = []
-    for res in response:
-        match_id = res["MatchId"]
-        if match_id.find("World") != -1 or match_id.find("Mid-Season") != -1 or match_id.find("Rift Rivals") != -1:
-            world_res.append(res)
+    if response:
+        for res in response:
+            match_id = res["MatchId"]
+            if match_id.find("World") != -1 or match_id.find("Mid-Season") != -1 or match_id.find("Rift Rivals") != -1:
+                world_res.append(res)
     return world_res
 
 
@@ -181,6 +205,6 @@ def data_process(response):
     return [
         {"total": match_total,
          "wins": match_wins,
-         "win_rate": round(match_wins / match_total, 2),
+         "win_rate": round(match_wins / max(match_total, 1), 2),
          "kills": match_kills, "deaths": match_deaths, "assists": match_assists},
         champions_meta]
