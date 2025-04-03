@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 from mwrogue.esports_client import EsportsClient
 from datetime import datetime as d, timezone, timedelta
 from flask_cors import CORS
@@ -15,7 +15,20 @@ def home():
 
 @app.route('/<player>')
 def player_all(player):
-    return [lpl_stats(player), world_stats(player), all_stats(player), match_schedule(player)]
+    try:
+        response = all_match_info(player)
+        schedule = match_schedule(player)
+        lpl_res = lpl_stats(response)
+        world_res = world_stats(response)
+        all_res = all_stats(response)
+    except Exception as e:
+        print(e)
+        return jsonify({
+            "error": "SERVER_ERROR",
+            "message": "Internal Server Error"
+        }), 500
+    else:
+        return [lpl_res, world_res, all_res, schedule]
 
 
 @app.route('/match-schedule/<player>')
@@ -27,39 +40,34 @@ def match_schedule(player):
             fields="P.Team",
             where='P.ID="%s"' % player,
         )
-
-        if type(team_list) is None:
-            return None
-
         team = team_list[0]['Team']
-
         datetime_week_later = d.now(timezone.utc) + timedelta(days=3)
-
         response = site.cargo_client.query(
             limit=3,
             tables="MatchSchedule=MS, Tournaments=T",
-            fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName, MS.Stream",
+            fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName, "
+                   "MS.Stream",
             where='(MS.Team1="%s" OR MS.Team2="%s") AND MS.DateTime_UTC<"%s"' % (team, team, datetime_week_later),
             join_on="MS.OverviewPage=T.OverviewPage",
             order_by="MS.DateTime_UTC DESC"
         )
-
+    except Exception as e:
+        print(e)
+        return None
+    else:
         for res in response:
             cst_date = d.strptime(res["DateTime UTC"],  "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
             res["DateTime CST"] = d.strftime(cst_date, "%Y-%m-%d %H:%M:%S")
             res["Day of Week"] = d.strftime(cst_date, "%a")
-
         return response
-    except Exception as e:
-        print(e)
 
 
 @app.route('/all-match-info/<player>')
 def all_match_info(player):
+    response = []
+    now = d.now(timezone.utc)
+    prev = d.now(timezone.utc) - timedelta(days=365)
     try:
-        response = []
-        now = d.now(timezone.utc)
-        prev = d.now(timezone.utc) - timedelta(days=365)
         res = site.cargo_client.query(
             limit=500,
             tables="ScoreboardPlayers=SP",
@@ -68,8 +76,6 @@ def all_match_info(player):
             where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
             order_by="SP.DateTime_UTC DESC"
         )
-        if type(res) is None:
-            return None
         while res:
             response += res
             now = prev
@@ -83,18 +89,14 @@ def all_match_info(player):
                 where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
                 order_by="SP.DateTime_UTC DESC"
             )
-
-        return response
     except Exception as e:
         print(e)
+        return None
+    else:
+        return response
 
 
-@app.route('/lpl-match-info/<player>')
-def lpl_match_info(player):
-    response = all_match_info(player)
-    if response is None:
-        return []
-
+def lpl_match_info(response):
     lpl_res = []
     for res in response:
         match_id = res["MatchId"]
@@ -104,12 +106,7 @@ def lpl_match_info(player):
     return lpl_res
 
 
-@app.route('/world-match-info/<player>')
-def world_match_info(player):
-    response = all_match_info(player)
-    if len(response) == 0:
-        return []
-
+def world_match_info(response):
     world_res = []
     for res in response:
         match_id = res["MatchId"]
@@ -118,21 +115,15 @@ def world_match_info(player):
     return world_res
 
 
-@app.route('/world-stats/<player>')
-def world_stats(player):
-    response = world_match_info(player)
-    return data_process(response)
+def world_stats(response):
+    return data_process(world_match_info(response))
 
 
-@app.route('/lpl-stats/<player>')
-def lpl_stats(player):
-    response = lpl_match_info(player)
-    return data_process(response)
+def lpl_stats(response):
+    return data_process(lpl_match_info(response))
 
 
-@app.route('/all-stats/<player>')
-def all_stats(player):
-    response = all_match_info(player)
+def all_stats(response):
     return data_process(response)
 
 
