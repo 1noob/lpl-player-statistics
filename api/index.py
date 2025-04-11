@@ -16,10 +16,6 @@ site = EsportsClient("lol")
 
 redis = Redis(url=os.environ.get("UPSTASH_REDIS_REST_URL"), token=os.environ.get("UPSTASH_REDIS_REST_TOKEN"))
 
-redis.set("foo", "bar")
-value = redis.get("foo")
-print(value)
-
 
 @app.route('/')
 def home():
