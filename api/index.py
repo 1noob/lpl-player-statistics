@@ -19,7 +19,7 @@ site = EsportsClient("lol")
 
 
 def _make_redis():
-    """Redis 是可选增强项：凭证缺失时不应让整个服务起不来。"""
+    """Redis is optional: missing credentials must not take the service down."""
     url = os.environ.get("UPSTASH_REDIS_REST_URL")
     token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
     if not url or not token:
@@ -36,7 +36,7 @@ redis = _make_redis()
 
 
 def cache_get(key):
-    """缓存读失败必须降级为未命中，不能把请求打死。"""
+    """A cache read failure degrades to a miss; it must never kill the request."""
     if redis is None:
         return None
     try:
@@ -62,9 +62,10 @@ def home():
 
 @app.route('/health')
 def health():
-    """真实的健康检查：能反映上游数据源是否可用。
+    """Real health check: reports whether the upstream data source is usable.
 
-    注意：这里不能用 `/<player>` 的通配路由代替，因为该路由会走完整取数流程。
+    Note: the catch-all `/<player>` route cannot serve this purpose because it
+    runs the full fetch pipeline.
     """
     try:
         site.cargo_client.query(
@@ -118,9 +119,10 @@ def player_all(player):
 
     payload = [lpl_data, world_data, all_data, schedule_data]
 
-    # 保持对前端的历史契约（200 + 四元数组），但把上游故障显式暴露出来，
-    # 前端据此可以区分"真的是 0"和"拿不到数据"。
-    # 用 Flask 自己的 JSON provider 序列化，保证响应字节与修改前完全一致。
+    # Keep the historical contract with the front end (200 + 4-element array)
+    # but surface the upstream failure explicitly, so the client can tell
+    # "really zero" apart from "fetch failed".
+    # Use the Flask JSON provider so the response bytes stay identical to before.
     if upstream_errors:
         resp = app.json.response(payload)
         resp.headers["X-Upstream-Status"] = "degraded"
@@ -131,12 +133,12 @@ def player_all(player):
 
 
 def match_schedule(player):
-    """下游即将开始的 3 场比赛。
+    """Upcoming 3 matches for the player's team.
 
-    注意：本函数是内部辅助函数，不应再挂 @app.route —— 之前它同时是 Flask 视图，
-    上游失败时 `return None` 会让 Flask 抛
-    `TypeError: The view function ... did not return a valid response.` 变成 500。
-    现在异常一律向上抛，由调用方决定如何降级。
+    This is an internal helper and must NOT carry @app.route: it used to be a
+    Flask view as well, and returning None on upstream failure made Flask raise
+    `TypeError: The view function ... did not return a valid response.` -> HTTP 500.
+    Exceptions now propagate and the caller decides how to degrade.
     """
     team_list = site.cargo_client.query(
         limit=1,
@@ -166,9 +168,9 @@ def match_schedule(player):
 
 
 def all_match_info(player):
-    """按年分页拉取该选手近几年的全部比赛记录。
+    """Page through the player's full match history, one year at a time.
 
-    注意：本函数是内部辅助函数，不应再挂 @app.route（原因同 match_schedule）。
+    Internal helper - must NOT carry @app.route (same reason as match_schedule).
     """
     response = []
     now = d.now(timezone.utc)
@@ -182,7 +184,7 @@ def all_match_info(player):
         where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
         order_by="SP.DateTime_UTC DESC"
     )
-    # 加保护：上游异常返回空结果时必须终止，否则这里会无限循环。
+    # Guard: the loop must terminate even if upstream keeps returning rows.
     guard = 0
     while res:
         guard += 1
