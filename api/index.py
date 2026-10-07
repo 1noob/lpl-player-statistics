@@ -1,7 +1,8 @@
 import json
 import os
+import logging
 
-from flask import Flask
+from flask import Flask, jsonify
 from mwrogue.esports_client import EsportsClient
 from datetime import datetime as d, timezone, timedelta
 from flask_cors import CORS
@@ -9,12 +10,49 @@ from upstash_redis import Redis
 from dotenv import load_dotenv
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 CORS(app)
 site = EsportsClient("lol")
 
 
-redis = Redis(url=os.environ.get("UPSTASH_REDIS_REST_URL"), token=os.environ.get("UPSTASH_REDIS_REST_TOKEN"))
+def _make_redis():
+    """Redis 是可选增强项：凭证缺失时不应让整个服务起不来。"""
+    url = os.environ.get("UPSTASH_REDIS_REST_URL")
+    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    if not url or not token:
+        logger.warning("UPSTASH_REDIS_REST_URL/TOKEN not set - running without cache")
+        return None
+    try:
+        return Redis(url=url, token=token)
+    except Exception:
+        logger.exception("failed to init Redis - running without cache")
+        return None
+
+
+redis = _make_redis()
+
+
+def cache_get(key):
+    """缓存读失败必须降级为未命中，不能把请求打死。"""
+    if redis is None:
+        return None
+    try:
+        return redis.get(key)
+    except Exception:
+        logger.exception("cache GET failed for key=%s", key)
+        return None
+
+
+def cache_set(key, value, seconds):
+    if redis is None:
+        return
+    try:
+        redis.setex(key=key, value=value, seconds=seconds)
+    except Exception:
+        logger.exception("cache SET failed for key=%s", key)
 
 
 @app.route('/')
@@ -22,96 +60,148 @@ def home():
     return 'Hello folks! Welcome to lpl statistics API.'
 
 
+@app.route('/health')
+def health():
+    """真实的健康检查：能反映上游数据源是否可用。
+
+    注意：这里不能用 `/<player>` 的通配路由代替，因为该路由会走完整取数流程。
+    """
+    try:
+        site.cargo_client.query(
+            limit=1,
+            tables="ScoreboardPlayers=SP",
+            fields="SP.MatchId",
+        )
+        return jsonify({"ok": True, "upstream": "reachable"})
+    except Exception as e:
+        logger.exception("health check failed")
+        return jsonify({"ok": False, "upstream": "unreachable", "error": str(e)}), 503
+
+
 @app.route('/<player>')
 def player_all(player):
-    cache_schedule_key = player+'_schedule'
-    cache_match_key = player+'_match'
+    cache_schedule_key = player + '_schedule'
+    cache_match_key = player + '_match'
 
-    cache_schedule_data = redis.get(cache_schedule_key)
-    cache_match_data = redis.get(cache_match_key)
+    cache_schedule_data = cache_get(cache_schedule_key)
+    cache_match_data = cache_get(cache_match_key)
+
+    upstream_errors = []
 
     if cache_schedule_data:
         schedule_data = json.loads(cache_schedule_data)
     else:
-        schedule_data = match_schedule(player)
-        redis.setex(key=cache_schedule_key, value=json.dumps(schedule_data), seconds=3600)
+        try:
+            schedule_data = match_schedule(player)
+        except Exception as e:
+            logger.exception("match_schedule failed for player=%s", player)
+            upstream_errors.append("schedule: %s" % e)
+            schedule_data = None
+        else:
+            cache_set(cache_schedule_key, json.dumps(schedule_data), 3600)
 
     if cache_match_data:
         match_data = json.loads(cache_match_data)
     else:
-        match_data = all_match_info(player)
-        redis.setex(key=cache_match_key, seconds=3600, value=json.dumps(match_data))
+        try:
+            match_data = all_match_info(player)
+        except Exception as e:
+            logger.exception("all_match_info failed for player=%s", player)
+            upstream_errors.append("match: %s" % e)
+            match_data = None
+        else:
+            cache_set(cache_match_key, json.dumps(match_data), 3600)
 
     lpl_data = lpl_stats(match_data)
     world_data = world_stats(match_data)
     all_data = all_stats(match_data)
 
-    return [lpl_data, world_data, all_data, schedule_data]
+    payload = [lpl_data, world_data, all_data, schedule_data]
+
+    # 保持对前端的历史契约（200 + 四元数组），但把上游故障显式暴露出来，
+    # 前端据此可以区分"真的是 0"和"拿不到数据"。
+    # 用 Flask 自己的 JSON provider 序列化，保证响应字节与修改前完全一致。
+    if upstream_errors:
+        resp = app.json.response(payload)
+        resp.headers["X-Upstream-Status"] = "degraded"
+        resp.headers["X-Upstream-Errors"] = "; ".join(upstream_errors)[:900]
+        return resp
+
+    return payload
 
 
-@app.route('/match-schedule/<player>')
 def match_schedule(player):
-    try:
-        team_list = site.cargo_client.query(
-            limit=1,
-            tables="Players=P",
-            fields="P.Team",
-            where='P.ID="%s"' % player,
-        )
-        team = team_list[0]['Team']
-        datetime_week_later = d.now(timezone.utc) + timedelta(days=3)
-        response = site.cargo_client.query(
-            limit=3,
-            tables="MatchSchedule=MS, Tournaments=T",
-            fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName, "
-                   "MS.Stream",
-            where='(MS.Team1="%s" OR MS.Team2="%s") AND MS.DateTime_UTC<"%s"' % (team, team, datetime_week_later),
-            join_on="MS.OverviewPage=T.OverviewPage",
-            order_by="MS.DateTime_UTC DESC"
-        )
-    except Exception as e:
-        print(e)
-        return None
-    else:
-        for res in response:
-            cst_date = d.strptime(res["DateTime UTC"],  "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
-            res["DateTime CST"] = d.strftime(cst_date, "%Y-%m-%d %H:%M:%S")
-            res["Day of Week"] = d.strftime(cst_date, "%a")
-        return response
+    """下游即将开始的 3 场比赛。
+
+    注意：本函数是内部辅助函数，不应再挂 @app.route —— 之前它同时是 Flask 视图，
+    上游失败时 `return None` 会让 Flask 抛
+    `TypeError: The view function ... did not return a valid response.` 变成 500。
+    现在异常一律向上抛，由调用方决定如何降级。
+    """
+    team_list = site.cargo_client.query(
+        limit=1,
+        tables="Players=P",
+        fields="P.Team",
+        where='P.ID="%s"' % player,
+    )
+    if not team_list:
+        raise LookupError('no team found for player "%s"' % player)
+
+    team = team_list[0]['Team']
+    datetime_week_later = d.now(timezone.utc) + timedelta(days=3)
+    response = site.cargo_client.query(
+        limit=3,
+        tables="MatchSchedule=MS, Tournaments=T",
+        fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName, "
+               "MS.Stream",
+        where='(MS.Team1="%s" OR MS.Team2="%s") AND MS.DateTime_UTC<"%s"' % (team, team, datetime_week_later),
+        join_on="MS.OverviewPage=T.OverviewPage",
+        order_by="MS.DateTime_UTC DESC"
+    )
+    for res in response:
+        cst_date = d.strptime(res["DateTime UTC"], "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
+        res["DateTime CST"] = d.strftime(cst_date, "%Y-%m-%d %H:%M:%S")
+        res["Day of Week"] = d.strftime(cst_date, "%a")
+    return response
 
 
-@app.route('/all-match-info/<player>')
 def all_match_info(player):
+    """按年分页拉取该选手近几年的全部比赛记录。
+
+    注意：本函数是内部辅助函数，不应再挂 @app.route（原因同 match_schedule）。
+    """
     response = []
     now = d.now(timezone.utc)
     prev = d.now(timezone.utc) - timedelta(days=365)
-    try:
+
+    res = site.cargo_client.query(
+        limit=500,
+        tables="ScoreboardPlayers=SP",
+        fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
+               "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
+        where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
+        order_by="SP.DateTime_UTC DESC"
+    )
+    # 加保护：上游异常返回空结果时必须终止，否则这里会无限循环。
+    guard = 0
+    while res:
+        guard += 1
+        if guard > 50:
+            logger.warning("pagination guard tripped for player=%s", player)
+            break
+        response += res
+        now = prev
+        prev -= timedelta(days=365)
         res = site.cargo_client.query(
             limit=500,
-            tables="ScoreboardPlayers=SP",
+            tables="ScoreboardPlayers=SP, MatchSchedule=MS",
             fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
                    "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
+            join_on="SP.MatchId=MS.MatchId",
             where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
             order_by="SP.DateTime_UTC DESC"
         )
-        while res:
-            response += res
-            now = prev
-            prev -= timedelta(days=365)
-            res = site.cargo_client.query(
-                limit=500,
-                tables="ScoreboardPlayers=SP, MatchSchedule=MS",
-                fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
-                       "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
-                join_on="SP.MatchId=MS.MatchId",
-                where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
-                order_by="SP.DateTime_UTC DESC"
-            )
-    except Exception as e:
-        print(e)
-        return None
-    else:
-        return response
+    return response
 
 
 def lpl_match_info(response):
