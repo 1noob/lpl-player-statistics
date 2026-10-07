@@ -134,6 +134,65 @@ def is_rate_limited(exc):
     return "ratelimited" in str(exc).lower() or "rate limit" in str(exc).lower()
 
 
+def _lookup_players(where, limit=5):
+    """Query the Players table for ID + canonical page name."""
+    return site.cargo_client.query(
+        limit=limit,
+        tables="Players=P",
+        fields="P.ID, P.OverviewPage",
+        where=where,
+    )
+
+
+def resolve_player_name(player):
+    """Map an arbitrary player string to the canonical Leaguepedia OverviewPage.
+
+    `ScoreboardPlayers.Link` stores the *disambiguated* OverviewPage value, so
+    exact-matching a bare handle silently returns zero rows: "Uzi" matches
+    nothing, because Leaguepedia files him under "Uzi (Jian Zi-Hao)". A
+    200-with-zero-rows response then looks like a success and used to get
+    cached, which is far worse than an honest error.
+
+    Resolution order:
+      1. OverviewPage exact match - callers who already pass the full
+         disambiguated name, plus the common case where handle == page name.
+      2. ID exact match - resolves to the OverviewPage directly.
+      3. If the ID matches several players, the handle is ambiguous. Accept it
+         only when exactly one candidate is "<player> (<something>)"; handles
+         shared by two similarly-named foreign players (e.g. Uzi) stay
+         ambiguous and are reported instead of guessed.
+
+    Returns (canonical_name, candidates). `canonical_name` is None when the
+    name could not be resolved unambiguously; `candidates` then carries the
+    competing OverviewPage values so the caller can report them.
+    """
+    if not player:
+        return None, []
+
+    # 1. Caller passed the canonical page name already.
+    rows = _lookup_players('P.OverviewPage="%s"' % player)
+    if len(rows) == 1 and rows[0].get("OverviewPage"):
+        return rows[0]["OverviewPage"], []
+
+    # 2. Handle matches a player ID.
+    if not rows:
+        rows = _lookup_players('P.ID="%s"' % player)
+    pages = [r["OverviewPage"] for r in rows if r.get("OverviewPage")]
+    pages = list(dict.fromkeys(pages))  # de-dup, preserve order
+    if len(pages) == 1:
+        return pages[0], []
+    if len(pages) > 1:
+        # 3. Ambiguous handle. A disambiguated page is "<handle> (<real name>)".
+        # Accept it only when exactly one candidate has that shape; otherwise
+        # guessing would silently serve another player's statistics.
+        prefixed = [p for p in pages if p.startswith(player + " (")]
+        if len(prefixed) == 1:
+            return prefixed[0], []
+        return None, pages
+
+    return None, []
+
+
 def fetch_with_cache(key, fetch):
     """Read-through fetch with stale-while-error.
 
@@ -162,6 +221,18 @@ def fetch_with_cache(key, fetch):
             logger.info("serving stale cache for %s after upstream failure", key)
             return cached, None
         return None, e
+
+    if not value:
+        # Upstream answered 200 but with zero rows. That is almost always a
+        # query-shape problem (e.g. a player name that does not resolve), not a
+        # genuine "this player has no matches" - and it is indistinguishable
+        # from a real empty result at this layer. Positive-caching it for
+        # FRESH_TTL and mirroring it into the 30-day stale slot would make the
+        # bad answer sticky and outlive the bug. Serve it once, but let the
+        # next request re-probe upstream.
+        logger.warning("upstream returned an empty result set for %s; "
+                       "not caching so a later request can retry", key)
+        return None, LookupError("upstream returned no rows for %s" % key)
 
     cache_save(key, value)
     return value, None
@@ -199,17 +270,50 @@ def health():
         return jsonify({"ok": False, "upstream": "unreachable", "error": str(e)}), 503
 
 
+def _empty_payload():
+    """The 4-slot contract with every statistic zeroed.
+
+    Mirrors the shape the front end already handles, so a missing player
+    degrades to "no stats" rather than to a client-side crash.
+    """
+    zero = {"total": 0, "wins": 0, "win_rate": 0.0,
+            "kills": 0, "deaths": 0, "assists": 0}
+    return [[dict(zero), []], [dict(zero), []], [dict(zero), []], []]
+
+
 @app.route('/<player>')
 def player_all(player):
     upstream_errors = []
 
+    # `Link`/`OverviewPage` are matched exactly, so a bare handle that is not
+    # itself the page name (e.g. "Uzi" vs "Uzi (Jian Zi-Hao)") would silently
+    # yield an all-zero payload. Resolve once, up front, and use the canonical
+    # name for every downstream query.
+    try:
+        resolved, candidates = resolve_player_name(player)
+    except Exception as e:
+        # A resolver failure is an upstream problem, not a missing player.
+        logger.exception("player name resolution failed for %r", player)
+        if is_rate_limited(e):
+            note_upstream_failure()
+        return app.json.response(_empty_payload()), 503
+
+    if resolved is None:
+        logger.warning("could not resolve player %r (candidates=%s)",
+                       player, candidates)
+        resp = app.json.response(_empty_payload())
+        resp.headers["X-Upstream-Status"] = "degraded"
+        if candidates:
+            resp.headers["X-Player-Candidates"] = ", ".join(candidates)[:900]
+        return resp, 404
+
     schedule_data, schedule_err = fetch_with_cache(
-        player + '_schedule', lambda: match_schedule(player))
+        resolved + '_schedule', lambda: match_schedule(resolved))
     if schedule_err is not None:
         upstream_errors.append("schedule: %s" % schedule_err)
 
     match_data, match_err = fetch_with_cache(
-        player + '_match', lambda: all_match_info(player))
+        resolved + '_match', lambda: all_match_info(resolved))
     if match_err is not None:
         upstream_errors.append("match: %s" % match_err)
 
@@ -235,6 +339,10 @@ def player_all(player):
 def match_schedule(player):
     """Upcoming 3 matches for the player's team.
 
+    `player` is the canonical OverviewPage produced by `resolve_player_name`,
+    so look the team up by OverviewPage rather than ID - a disambiguated page
+    such as "Uzi (Jian Zi-Hao)" is not a valid ID and would match nothing.
+
     This is an internal helper and must NOT carry @app.route: it used to be a
     Flask view as well, and returning None on upstream failure made Flask raise
     `TypeError: The view function ... did not return a valid response.` -> HTTP 500.
@@ -244,7 +352,7 @@ def match_schedule(player):
         limit=1,
         tables="Players=P",
         fields="P.Team",
-        where='P.ID="%s"' % player,
+        where='P.OverviewPage="%s"' % player,
     )
     if not team_list:
         raise LookupError('no team found for player "%s"' % player)
@@ -271,17 +379,29 @@ def all_match_info(player):
     """Page through the player's full match history, one year at a time.
 
     Internal helper - must NOT carry @app.route (same reason as match_schedule).
+
+    `DateTime_UTC` is stored as a bare "YYYY-MM-DD HH:MM:SS" string, and Cargo
+    compares it lexicographically. Interpolating a raw datetime object here
+    produced "2025-10-07 10:23:43.354062+00:00" - a value that sorts *after*
+    every real timestamp, so `>= prev AND <= now` matched nothing and the walk
+    stopped on the very first page. Any player whose last match was over a year
+    ago therefore returned zero games (e.g. retired players such as Uzi).
+    Format both bounds exactly like the data and like match_schedule does.
     """
     response = []
     now = d.now(timezone.utc)
     prev = d.now(timezone.utc) - timedelta(days=365)
+
+    def _bound(value):
+        return d.strftime(value, "%Y-%m-%d %H:%M:%S")
 
     res = site.cargo_client.query(
         limit=500,
         tables="ScoreboardPlayers=SP",
         fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
                "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
-        where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
+        where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" '
+              % (player, _bound(prev), _bound(now)),
         order_by="SP.DateTime_UTC DESC"
     )
     # Guard: the loop must terminate even if upstream keeps returning rows.
@@ -300,7 +420,8 @@ def all_match_info(player):
             fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
                    "SP.Champion, SP.Kills, SP.Deaths, SP.Assists",
             join_on="SP.MatchId=MS.MatchId",
-            where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" ' % (player, prev, now),
+            where='SP.Link="%s" AND SP.DateTime_UTC >= "%s" AND SP.DateTime_UTC <= "%s" '
+                  % (player, _bound(prev), _bound(now)),
             order_by="SP.DateTime_UTC DESC"
         )
     return response
