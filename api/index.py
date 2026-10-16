@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import logging
+import threading
 
 from flask import Flask, jsonify
 from mwrogue.esports_client import EsportsClient
@@ -24,13 +25,49 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
-site = EsportsClient("lol")
 
-# api.php?action=cargoquery is behind a per-IP quota that a single page load
-# can exhaust. Special:CargoExport serves the same query through the page
-# pipeline and is not subject to that quota, so swap the cargo client for one
-# that fails over automatically. See cargo_export_fallback.py.
-site.cargo_client = CargoExportFallbackClient(site.client, wiki_host="lol.fandom.com")
+# The upstream client is built on first use, NOT at import time.
+#
+# `EsportsClient("lol")` performs a live siteinfo request to lol.fandom.com
+# from inside its constructor. Doing that at module scope had two consequences
+# on serverless, both bad:
+#   1. The container could not finish importing - so it could not answer
+#      anything at all, not even /health - until Fandom had replied. That
+#      round-trip therefore sat on the critical path of every single cold
+#      start, before any of our own code had run.
+#   2. If Fandom was slow, rate limiting, or refusing TLS, the import raised
+#      and *every* route returned FUNCTION_INVOCATION_FAILED instead of a
+#      graceful degraded response. One upstream hiccup at boot took the whole
+#      API down rather than one request.
+# Constructing it lazily keeps module import free of network side effects and
+# moves any failure into the request, where the existing error handling can
+# catch it. A failed attempt simply does not set _site, so the next request
+# retries instead of staying broken.
+_site = None
+_site_lock = threading.Lock()
+
+
+def get_site():
+    """Return the shared upstream client, constructing it on first use."""
+    global _site
+    if _site is None:
+        with _site_lock:
+            if _site is None:
+                client = EsportsClient("lol")
+                # api.php?action=cargoquery is behind a per-IP quota that a
+                # single page load can exhaust. Special:CargoExport serves the
+                # same query through the page pipeline and is not subject to
+                # that quota, so swap the cargo client for one that fails over
+                # automatically. See cargo_export_fallback.py.
+                client.cargo_client = CargoExportFallbackClient(
+                    client.client, wiki_host="lol.fandom.com")
+                _site = client
+    return _site
+
+
+def cargo_client():
+    """The cargo client, with the CargoExport fallback already wired in."""
+    return get_site().cargo_client
 
 # How long a cached value counts as "fresh" (served without touching upstream).
 FRESH_TTL = 6 * 3600
@@ -46,6 +83,46 @@ STALE_TTL = 30 * 24 * 3600
 # cargo_export_fallback.py handles the common api.php rate limit on its own.
 UPSTREAM_COOLDOWN = 5 * 60
 _last_upstream_failure = 0.0
+
+
+# --------------------------------------------------------------- edge caching
+#
+# A cold container on this project costs several seconds, and that cost lands on
+# whoever happens to arrive first. The data behind /<player> changes at most
+# once a day, so the better fix is not "boot faster" but "do not invoke the
+# function at all" for repeat callers.
+#
+# `s-maxage` lets Vercel's edge hold the JSON. `stale-while-revalidate` is the
+# part that actually removes the wait: once an entry exists, a request is
+# answered from the edge immediately and the refresh happens in the background,
+# so the slow path stops being on any user's critical path.
+EDGE_FRESH_SECONDS = 6 * 3600
+EDGE_SWR_SECONDS = 24 * 3600
+
+# A degraded payload is real (previously cached) data rather than zeros, so it
+# is still worth serving - but it may be stale and upstream may be about to
+# recover, so hold it only briefly and keep revalidating.
+EDGE_DEGRADED_SECONDS = 60
+EDGE_DEGRADED_SWR_SECONDS = 10 * 60
+
+
+def _cache_headers(response, degraded=False):
+    """Mark a good-enough-to-share payload as cacheable at the CDN edge."""
+    if degraded:
+        response.headers["Cache-Control"] = (
+            "public, s-maxage=%d, stale-while-revalidate=%d"
+            % (EDGE_DEGRADED_SECONDS, EDGE_DEGRADED_SWR_SECONDS))
+    else:
+        response.headers["Cache-Control"] = (
+            "public, s-maxage=%d, stale-while-revalidate=%d"
+            % (EDGE_FRESH_SECONDS, EDGE_SWR_SECONDS))
+    return response
+
+
+def _no_store(response):
+    """Errors and probes are point-in-time facts; caching them only hurts."""
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _make_redis():
@@ -136,7 +213,7 @@ def is_rate_limited(exc):
 
 def _lookup_players(where, limit=5):
     """Query the Players table for ID + canonical page name."""
-    return site.cargo_client.query(
+    return cargo_client().query(
         limit=limit,
         tables="Players=P",
         fields="P.ID, P.OverviewPage",
@@ -251,23 +328,24 @@ def health():
     runs the full fetch pipeline.
     """
     if upstream_in_cooldown():
-        return jsonify({
+        return _no_store(jsonify({
             "ok": False,
             "upstream": "cooldown",
             "error": "rate limited recently; not probing upstream again yet",
-        }), 503
+        })), 503
     try:
-        site.cargo_client.query(
+        cargo_client().query(
             limit=1,
             tables="ScoreboardPlayers=SP",
             fields="SP.MatchId",
         )
-        return jsonify({"ok": True, "upstream": "reachable"})
+        return _no_store(jsonify({"ok": True, "upstream": "reachable"}))
     except Exception as e:
         logger.exception("health check failed")
         if is_rate_limited(e):
             note_upstream_failure()
-        return jsonify({"ok": False, "upstream": "unreachable", "error": str(e)}), 503
+        return _no_store(jsonify(
+            {"ok": False, "upstream": "unreachable", "error": str(e)})), 503
 
 
 def _empty_payload():
@@ -296,7 +374,7 @@ def player_all(player):
         logger.exception("player name resolution failed for %r", player)
         if is_rate_limited(e):
             note_upstream_failure()
-        return app.json.response(_empty_payload()), 503
+        return _no_store(app.json.response(_empty_payload())), 503
 
     if resolved is None:
         logger.warning("could not resolve player %r (candidates=%s)",
@@ -305,7 +383,7 @@ def player_all(player):
         resp.headers["X-Upstream-Status"] = "degraded"
         if candidates:
             resp.headers["X-Player-Candidates"] = ", ".join(candidates)[:900]
-        return resp, 404
+        return _no_store(resp), 404
 
     schedule_data, schedule_err = fetch_with_cache(
         resolved + '_schedule', lambda: match_schedule(resolved))
@@ -331,9 +409,14 @@ def player_all(player):
         resp = app.json.response(payload)
         resp.headers["X-Upstream-Status"] = "degraded"
         resp.headers["X-Upstream-Errors"] = "; ".join(upstream_errors)[:900]
-        return resp
+        return _cache_headers(resp, degraded=True)
 
-    return payload
+    # Clean success: real upstream data, shareable at the edge for the long
+    # window. The header is explicit so a cached answer can be told apart from
+    # a degraded one when debugging.
+    resp = app.json.response(payload)
+    resp.headers["X-Upstream-Status"] = "ok"
+    return _cache_headers(resp)
 
 
 def match_schedule(player):
@@ -348,7 +431,7 @@ def match_schedule(player):
     `TypeError: The view function ... did not return a valid response.` -> HTTP 500.
     Exceptions now propagate and the caller decides how to degrade.
     """
-    team_list = site.cargo_client.query(
+    team_list = cargo_client().query(
         limit=1,
         tables="Players=P",
         fields="P.Team",
@@ -359,7 +442,7 @@ def match_schedule(player):
 
     team = team_list[0]['Team']
     datetime_week_later = d.now(timezone.utc) + timedelta(days=3)
-    response = site.cargo_client.query(
+    response = cargo_client().query(
         limit=3,
         tables="MatchSchedule=MS, Tournaments=T",
         fields="MS.Team1, MS.Team2, MS.DateTime_UTC, MS.Team1Score, MS.Team2Score, MS.BestOf, T.StandardName, "
@@ -395,7 +478,7 @@ def all_match_info(player):
     def _bound(value):
         return d.strftime(value, "%Y-%m-%d %H:%M:%S")
 
-    res = site.cargo_client.query(
+    res = cargo_client().query(
         limit=500,
         tables="ScoreboardPlayers=SP",
         fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
@@ -414,7 +497,7 @@ def all_match_info(player):
         response += res
         now = prev
         prev -= timedelta(days=365)
-        res = site.cargo_client.query(
+        res = cargo_client().query(
             limit=500,
             tables="ScoreboardPlayers=SP, MatchSchedule=MS",
             fields="SP.OverviewPage, SP.Team, SP.TeamVs, SP.DateTime_UTC, SP.PlayerWin, SP.MatchId, "
